@@ -60,7 +60,7 @@ class BlockedSimulation {
     private:
         std::vector< std::vector<SimBlock> > blocks;
         static constexpr int nghost = 3;   // Number of ghost cells
-        static constexpr int nblocks = 2;   // Number of blocks in each dimension ->sqrt(nthreads)
+        static constexpr int nblocks = 4;   // Number of blocks in each dimension ->sqrt(nthreads)
 
         const int nx, ny;                // Number of (non-ghost) cells in x/y
         const int nx_block, ny_block;    // Cells in a block
@@ -69,7 +69,7 @@ class BlockedSimulation {
         const real cfl;                  // Allowed CFL number
 
         // Call copy operations for each block
-        void copy_ghosts();
+        void copy_ghosts(int, int);
 };
 
 template<typename F>
@@ -81,9 +81,7 @@ void BlockedSimulation::init(F f) {
   }
 }
 
-void BlockedSimulation::copy_ghosts() {
-    for (int i=0; i<nblocks; i++)
-        for (int j=0; j<nblocks; j++) {
+void BlockedSimulation::copy_ghosts(int i, int j) {
             int i_top = (i-1+nblocks)%nblocks;
             int i_bot = (i+1)%nblocks;
             int j_left = j==0 ? nblocks-1 : j-1;
@@ -98,7 +96,6 @@ void BlockedSimulation::copy_ghosts() {
             self.copy_ghosts_form_bottomright(blocks[i_bot][j_right]);
             self.copy_ghosts_form_top(blocks[i_top][j]);
             self.copy_ghosts_form_bot(blocks[i_bot][j]);
-        }
 }
 
 void BlockedSimulation::solution_check(){
@@ -131,20 +128,25 @@ void BlockedSimulation::run(real tfinal) {
     real dt;
     std::vector<real> cx(nblocks*nblocks);
     std::vector<real> cy(nblocks*nblocks);
+    real cxmax, cymax;
+    int io;
+    #pragma omp parallel shared(cx, cy, done) private(io, t, dt, cxmax, cymax)\
+                        num_threads(nblocks*nblocks)
     while (!done) {
-        for (int io = 0; io < 2; io++) {
+        for (io = 0; io < 2; io++) {
+            #pragma omp for collapse(2)
             for (int i = 0; i < nblocks; i++) {
                 for (int j = 0; j < nblocks; j++) {
-                    copy_ghosts(); // this is new apply_periodic
+                    copy_ghosts(i, j); // this is new apply_periodic
 
                     //calculate cx, cy calling compute_fg_speeds()
                     blocks[i][j].compute_fg_speeds(cx[i*nblocks+j],cy[i*nblocks+j]);
                     blocks[i][j].limited_derivs();
                 }
             }
+
             if (io == 0) {
                 //find the global dt (smallest allowed or something)
-                real cxmax, cymax;
                 cxmax = *std::max_element(cx.begin(), cx.end());
                 cymax = *std::max_element(cy.begin(), cy.end());
                 dt = cfl / std::max(cxmax/dx, cymax/dy);
@@ -155,6 +157,7 @@ void BlockedSimulation::run(real tfinal) {
             }
 
             //compute_step
+            #pragma omp for collapse(2)
             for (int i = 0; i < nblocks; i++) {
                 for (int j = 0; j < nblocks; j++) {
                     blocks[i][j].compute_step(io,dt);
@@ -162,7 +165,6 @@ void BlockedSimulation::run(real tfinal) {
             }
             // evaluate dt
             t += dt;
-
         }
     }
 }
